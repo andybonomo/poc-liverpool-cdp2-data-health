@@ -1,0 +1,26 @@
+# This file specifies files and directories to ignore when deploying to Google Cloud.
+# It is common to ignore local development files, logs, and other unnecessary files.
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore virtual environment directories
+venv/
+env/
+
+# Ignore local configuration files
+*.env
+
+# Ignore logs
+*.log
+
+# Ignore Docker files if not needed for deployment
+Dockerfile
+
+# Ignore README if not needed for deployment
+README.md
+
+# Ignore GitHub workflows if not needed for deployment
+.github/
