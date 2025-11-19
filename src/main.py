@@ -3,15 +3,15 @@ import json
 from flask import Flask, request, jsonify
 from google.cloud import bigquery
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# Eliminamos ThreadPoolExecutor ya que el procesamiento es ahora de una sola tabla.
 
 app = Flask(__name__)
 client = bigquery.Client()
-PROJECT_ID = os.environ.get("GCP_PROJECT", client.project) 
-MAX_WORKERS = 10  # Número máximo de tablas a procesar en paralelo
+PROJECT_ID = os.environ.get("GCP_PROJECT", client.project)
+# MAX_WORKERS ya no es necesario.
 
 def process_single_table(source_dataset_id, table_id):
-    """Lógica para perfilar una única tabla."""
+    """Lógica para perfilar una única tabla. (Mantenemos el nombre de la función original)"""
     full_table_id = f"{PROJECT_ID}.{source_dataset_id}.{table_id}"
     report_data = []
 
@@ -49,6 +49,8 @@ def process_single_table(source_dataset_id, table_id):
         for field_name, field_type in fields:
             null_count_key = f"null_{field_name}_count"
             null_count = row_data[null_count_key]
+            # Usar un pequeño valor epsilon para evitar ZeroDivisionError en caso de bug,
+            # aunque total_rows=0 ya se maneja arriba.
             null_percentage = (null_count / total_rows) * 100
             
             report_data.append({
@@ -68,43 +70,26 @@ def process_single_table(source_dataset_id, table_id):
         return [], error_msg
 
 
-def get_null_percentage_report(source_dataset_id, destination_dataset_id):
-    """Coordina el procesamiento paralelo de todas las tablas."""
+def get_null_percentage_report(source_dataset_id, source_table_id, destination_dataset_id, destination_table_id):
+    """
+    Procesa una única tabla de origen y guarda el reporte en una tabla de destino específica.
+    """
     
-    # 1. Obtener lista de tablas
-    tables = client.list_tables(source_dataset_id)
-    table_ids = [table.table_id for table in tables]
+    # Llama directamente a la función de procesamiento de una sola tabla.
+    report_data, error = process_single_table(source_dataset_id, source_table_id)
+
+    if error:
+        # Retorna el error de la tabla específica
+        return f"Fallo al procesar {source_table_id}: {error}", 500
+
+    if not report_data:
+        # Si la tabla está vacía o no se generó reporte.
+        return f"Proceso finalizado. La tabla {source_table_id} está vacía.", 200
+
+    # 3. Guardar el reporte en BigQuery
+    df_report = pd.DataFrame(report_data)
     
-    if not table_ids:
-        return f"No se encontraron tablas en el dataset: {source_dataset_id}", 404
-
-    all_reports = []
-    
-    # 2. Usar ThreadPoolExecutor para procesamiento concurrente
-    # Como la tarea es I/O-bound (esperar a BQ), los threads son eficientes.
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Mapear la función de procesamiento a cada tabla
-        future_to_table = {executor.submit(process_single_table, source_dataset_id, tid): tid 
-                           for tid in table_ids}
-        
-        # Esperar y procesar resultados a medida que llegan
-        for future in as_completed(future_to_table):
-            table_id = future_to_table[future]
-            try:
-                report_data, error = future.result()
-                if error:
-                    # Opcional: registrar el error en el reporte final
-                    pass 
-                all_reports.extend(report_data)
-            except Exception as e:
-                print(f"La tabla {table_id} generó una excepción: {e}")
-
-    # 3. Guardar el reporte en BigQuery (igual que la versión anterior)
-    if not all_reports:
-        return "Proceso finalizado. No se generó reporte (tablas vacías o errores).", 200
-
-    df_report = pd.DataFrame(all_reports)
-    destination_table_id = "column_null_report" 
+    # El destino ahora es completamente dinámico (dataset + nombre de tabla de destino)
     table_ref = f"{PROJECT_ID}.{destination_dataset_id}.{destination_table_id}"
     
     # Escribir en BigQuery
@@ -112,12 +97,12 @@ def get_null_percentage_report(source_dataset_id, destination_dataset_id):
     job = client.load_table_from_dataframe(df_report, table_ref, job_config=job_config) 
     job.result()  
     
-    return f"Reporte de {len(table_ids)} tablas guardado en: {table_ref}", 200
+    return f"Reporte de la tabla {source_table_id} guardado en: {table_ref}", 200
 
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # Lógica de manejo de parámetros HTTP (sin cambios)
+    # Lógica de manejo de parámetros HTTP
     if request.method == "POST":
         try:
             data = request.get_json() or request.form
@@ -126,17 +111,25 @@ def index():
     else:
         data = request.args
 
+    # Nuevos parámetros requeridos
     source_ds = data.get("dataset-a-revisar")
+    source_tbl = data.get("tabla-a-revisar")
     dest_ds = data.get("dataset-destino")
-
-    if not source_ds or not dest_ds:
+    dest_tbl = data.get("tabla-destino") # Nuevo nombre de tabla destino
+    
+    if not all([source_ds, source_tbl, dest_ds, dest_tbl]):
         return (
-            jsonify({"error": "Faltan parámetros. Se requiere 'dataset-a-revisar' y 'dataset-destino'."}),
+            jsonify({
+                "error": "Faltan parámetros. Se requiere 'dataset-a-revisar', 'tabla-a-revisar', 'dataset-destino' y 'tabla-destino'."
+            }),
             400,
         )
 
-    print(f"Iniciando revisión concurrente del Dataset: {source_ds}...")
-    message, status_code = get_null_percentage_report(source_ds, dest_ds)
+    print(f"Iniciando revisión de la tabla de origen: {source_ds}.{source_tbl}")
+    print(f"El reporte se guardará en la tabla destino: {dest_ds}.{dest_tbl}")
+
+    # Pasamos los cuatro parámetros a la función de reporte
+    message, status_code = get_null_percentage_report(source_ds, source_tbl, dest_ds, dest_tbl)
     print(f"Resultado: {message} (Código: {status_code})")
     
     return jsonify({"message": message}), status_code
