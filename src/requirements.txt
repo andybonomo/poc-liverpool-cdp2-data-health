@@ -2,3 +2,4 @@ Werkzeug==2.2.3
 flask
 google-cloud-bigquery
 pandas
+pyarrow
